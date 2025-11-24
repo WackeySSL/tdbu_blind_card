@@ -419,5 +419,8 @@ class TDBUMushroomStyleCard extends HTMLElement {
     this._hass.callService(domain, svc, data);
   }
 }
+// Register both names to support legacy configuration and correct naming
 customElements.define('tdbu-mushroom-style-card', TDBUMushroomStyleCard);
+customElements.define('tdbu-blind-card', TDBUMushroomStyleCard);
+
 
