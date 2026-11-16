@@ -1,5 +1,7 @@
 {
-  "name": "tdbu blind card",
+  "name": "TDBU Blind Card",
+  "filename": "tdbu_blind_card.js",
   "content_in_root": true,
-  "filename": "tdbu_blind_card.js"
+  "render_readme": true,
+  "homeassistant": "2024.11.0"
 }

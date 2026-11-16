@@ -1,435 +1,727 @@
-class TDBUMushroomStyleCard extends HTMLElement {
-    _isDraggingTop = false;
-    _isDraggingBottom = false;
-    _hasButtons = true;
-    _sliderWidth = '80px';
-    _pickerHeight = 10;
-    _userInteractedTop = false;
-    _userInteractedBottom = false;
-    _lastSetTopPosition = null;
-    _lastSetBottomPosition = null;
-    _disableIfSensorOpen = null;
-    _lastHass = null;
+/*!
+ * TDBU Blind Card 2.0.0
+ * Home Assistant card for top-down/bottom-up (TDBU) blinds such as Hunter Douglas PowerView.
+ * https://github.com/WackeySSL/tdbu_blind_card  ·  Apache License 2.0
+ *
+ * One window per room: drag the rails of the big "Both" window to move both blinds together,
+ * or the small Left/Right windows to move one blind. Buttons always act on the whole room.
+ * An open door only blocks the bottom rail from going DOWN, and only on the door's side.
+ *
+ * Positions follow the PowerView entities, like version 1:
+ *   top rail    = position of the top entity      (0 = rail at the top of the window)
+ *   bottom rail = 100 - position of bottom entity (bottom position 100 = rail at the top)
+ */
 
-    set hass(hass) {
-        this._hass = hass;
-        if (!this._initialized) {
-            this._render();
-            this._initialized = true;
-            setTimeout(() => this._updateStates(), 100);
-        }
-        if (!this._shouldUpdate(hass)) return;
-        this._updateStates();
-        this._lastHass = hass;
-    }
+const TDBU_VERSION = "2.0.0";
+const GAP = 8;               // minimum distance between the two rails, in % of the window
+const PENDING_MS = 90000;    // keep showing a position we sent until the blind reports it
 
-    _shouldUpdate(newHass) {
-        if (!this._lastHass) return true;
-        const entityTop = this._config.entity_top;
-        const entityBottom = this._config.entity_bottom;
-        const sensor = this._disableIfSensorOpen;
+const STRINGS = {
+  en: {
+    house: "Whole house", allUp: "All up", allDown: "All down", more: "More",
+    roomsDown: (n, t) => `${n} of ${t} rooms down`, doorOpenList: l => `door open: ${l}`,
+    doorOpen: "Door open", doorBlocked: "The door is open, so the blind won't go down",
+    skipped: l => `Skipped because the door is open: ${l}`, allGoingUp: "All blinds are going up",
+    allGoingDown: "All blinds are going down", started: n => `${n} started`,
+    both: "Both", left: "Left", right: "Right", topRail: "Top rail", bottomRail: "Bottom rail",
+    covered: p => `${p} % covered`, down: "Down", up: "Up", stop: "Stop", isDown: "Down", isUp: "Up", differ: "Left and right are different",
+    moving: "Moving…", unknown: "Position unknown", missing: e => `Entity not found: ${e}`,
+  },
+  da: {
+    house: "Hele huset", allUp: "Alle op", allDown: "Alle ned", more: "Mere",
+    roomsDown: (n, t) => `${n} af ${t} rum nede`, doorOpenList: l => `dør åben: ${l}`,
+    doorOpen: "Dør åben", doorBlocked: "Døren står åben, så gardinet kører ikke ned",
+    skipped: l => `Springer over, fordi døren står åben: ${l}`, allGoingUp: "Alle gardiner kører op",
+    allGoingDown: "Alle gardiner kører ned", started: n => `${n} er sat i gang`,
+    both: "Begge", left: "Venstre", right: "Højre", topRail: "Øverste skinne", bottomRail: "Nederste skinne",
+    covered: p => `${p} % dækket`, down: "Ned", up: "Op", stop: "Stop", isDown: "Nede", isUp: "Oppe", differ: "Venstre og højre står forskelligt",
+    moving: "Kører…", unknown: "Position ukendt", missing: e => `Entitet findes ikke: ${e}`,
+  },
+};
 
-        if (entityTop && newHass.states[entityTop] !== this._lastHass.states[entityTop]) return true;
-        if (entityBottom && newHass.states[entityBottom] !== this._lastHass.states[entityBottom]) return true;
-        if (sensor && newHass.states[sensor] !== this._lastHass.states[sensor]) return true;
+const DEFAULT_BUTTONS = [
+  { name: "@up", icon: "mdi:arrow-collapse-up", position: { top: 1, bottom: 99 } },
+  { name: "@stop", icon: "mdi:stop", action: "stop" },
+  { name: "@down", icon: "mdi:arrow-collapse-down", position: { top: 1, bottom: 1 } },
+];
 
-        return false;
-    }
-
-    setConfig(config) {
-        if (!config.entity_bottom) {
-            throw new Error("Define entity_bottom");
-        }
-        this._config = config;
-        this._hasButtons = config.show_buttons !== false;
-        this._sliderWidth = config.slider_width || '80px';
-        this._disableIfSensorOpen = config.disable_if_sensor_open || null;
-    }
-
-    getCardSize() {
-        return 3;
-    }
-
-    _render() {
-        const shadow = this.attachShadow({
-            mode: "open"
-        });
-        const hasTopEntity = !!this._config.entity_top;
-        const buttonColumnStyle = this._hasButtons ? `
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            margin-right: 12px;
-          ` : 'display: none;';
-        const nameHTML = this._config.name ? `<div class="name">${this._config.name}</div>` : '';
-
-        const wrapperStyle = this._hasButtons ? `
-            display: flex;
-            align-items: center;
-            padding: 16px;
-          ` : `
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 16px;
-          `;
-
-        shadow.innerHTML = `
-        <style>
-          :host { display: block; }
-          .wrapper {
-            ${wrapperStyle}
-            background-color: var(--card-background-color, #1e1e1e);
-            color: var(--primary-text-color, #fff);
-            border-radius: var(--ha-card-border-radius, 12px);
-            transition: opacity 0.3s ease-in-out;
-          }
-          .wrapper.disabled {
-            opacity: 0.5;
-            pointer-events: none;
-          }
-          .buttons {
-            ${buttonColumnStyle}
-          }
-          .buttons button {
-            background: none;
-            border: none;
-            color: inherit;
-            font-size: 20px;
-            cursor: pointer;
-          }
-          .buttons button:hover { color: var(--accent-color, #ffc107); }
-  
-          .slider-background {
-            position: relative;
-            width: ${this._sliderWidth};
-            height: 150px;
-            background-size: 100% 100%;
-            background-repeat: no-repeat;
-            background-image: url(data:image/png;base64,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);
-          }
-  
-          .slider-box {
-            position: absolute;
-            top: 20px;
-            left: 0;
-            width: 100%;
-            height: calc(100% - 20px);
-            display: flex;
-            flex-direction: column;
-            justify-content: flex-start;
-          }
-  
-          .picker {
-            position: absolute;
-            width: 100%;
-            height: ${this._pickerHeight}px;
-            background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAJQAAAAHCAYAAADuzmQ5AAAABGdBTUEAALGeYUxB9wAAACBjSFJNAACHCwAAjBIAAP70AAB/DgAAgQYAAOhBAAA54AAAHiqESS3PAAAA22lDQ1BJQ0MgUHJvZmlsZQAAKM9jYGB8wAAETECcm1dSFOTupBARGaXAfoGBEQjBIDG5uMA32C2EASf4dg2i9rIuA+mAs7ykoARIfwBikaKQIGegm1iAbL50CFsExE6CsFVA7CKgA4FsE5D6dAjbA8ROgrBjQOzkgiKgmYwFIPNTUouTgewGIDsB5DeItZ9ZwW5mFFVKLi0qg7qFkcmYgYEQH2FGHjsDg9lVBgbm/Qix1G4Ghm0nGRjE5RBiykC3CyUyMOxIKkmtKEH2PMRtYMCWXwAMfQZqAgYGAC7ONG+WT8jJAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAB5klEQVRYR+2XwWrCQBCGs2li7KmQCqJ46qVv0KeofRZfpM/Qk4fqQ0jRkydBBKGnHnopNmJiAjFp0v9Ps2UrEmyLtEI+GGYzOzMbsz+bKObzeadWq91qJSW/wPf9O8/zZmIymXTr9XrbNM0q4inQhBAfWcWkMAO5ES/gN6xDfTVJkhOEYoY5V/L/Ufed3rKsLBaG4Zc5iYzpus5x4jjOwnXdoRiNRv1Go9E2DMOSibsaFMGG+TADtXo+LDki1L2nUAh0oUVRtFMTjOWCSiEmZ71eD8R4PL5vtVo3KKwyQdq+gkLuGxwFxVOJp5Y8ueBKjg3ufRzHWqVSyTwFhTdONlcgqGS5XC7wynsQ0+m032w222iQnVD7ojRzsZCBRSlprmjiujyhjhApJgqHe0u/LSIVqQHsfYpXngNBDfjK6+Kj/Fp+QzGxqIkEzVI009EsQD7FyNoNzKQhniBOcFlyCLihNMLn/JNnLXuwFj6FoNjEkv1gIdPgSVYjYV1+qCSr1eoVghqKXq/XsW37CoIymQAdZEl7wF9yDouxUB3mo/6J94TYqdrnGz3/HHmv8uHJZ0LUuITzpCjnUGzv1/a9F6HUYphmDeA91D7DXjDmn6wL+DNMPcJf4tqGfX4vK+vxG8oNgmD2Di0RPo9DidC/AAAAAElFTkSuQmCC);
-            background-repeat: no-repeat;
-            cursor: pointer;
-            z-index: 2;
-          }
-  
-          #picker-top { top: 0; }
-          #picker-bottom { bottom: 0; z-index: 1; }
-
-          .covered-area {
-            position: absolute;
-            left: 0;
-            width: 100%;
-            background-color: #FFEC8B;
-            z-index: 1;
-            pointer-events: none;
-          }
-
-          .name {
-            margin-top: 8px;
-            font-size: 14px;
-            color: var(--secondary-text-color, #9e9e9e);
-            text-align: center;
-            width: ${this._sliderWidth};
-          }
-        </style>
-        <div class="wrapper">
-          <div class="buttons">
-            <button id="btn-top-up">▲</button>
-            <button id="btn-stop">■</button>
-            <button id="btn-bottom-down">▼</button>
-          </div>
-          <div class="slider-container">
-            <div class="slider-background">
-              <div class="slider-box">
-                <div class="covered-area" id="covered-area"></div>
-                ${hasTopEntity ? '<div class="picker" id="picker-top" style="top: 0px;"></div>' : ''}
-                <div class="picker" id="picker-bottom" style="bottom: 0px;"></div>
-              </div>
-            </div>
-            ${nameHTML}
-          </div>
-        </div>
-      `;
-
-        this._pickerBottom = shadow.getElementById("picker-bottom");
-        this._coveredArea = shadow.getElementById("covered-area");
-        this._sliderBox = shadow.querySelector(".slider-box");
-        this._sliderBackground = shadow.querySelector(".slider-background");
-        this._buttonContainer = shadow.querySelector(".buttons");
-        this._wrapper = shadow.querySelector(".wrapper");
-
-        const btnTopUp = shadow.getElementById("btn-top-up");
-        if (btnTopUp) {
-            btnTopUp.addEventListener("click", () => {
-                if (this._config.entity_top) {
-                    this._call("set_cover_position", this._config.entity_top, 1);
-                }
-                if (this._config.entity_bottom) {
-                    this._call("set_cover_position", this._config.entity_bottom, 99);
-                }
-            });
-        }
-
-        if (this._config.entity_top) {
-            this._pickerTop = shadow.getElementById("picker-top");
-            this._setupPickerDrag("top");
-        } else {
-            this._isDraggingTop = true;
-        }
-
-        if (this._hasButtons) {
-            const btnStop = shadow.getElementById("btn-stop");
-            if (btnStop) {
-                btnStop.addEventListener("click", () => {
-                    if (this._config.entity_top) {
-                        this._call("stop_cover", this._config.entity_top);
-                    }
-                    this._call("stop_cover", this._config.entity_bottom);
-                });
-            }
-            const btnBottomDown = shadow.getElementById("btn-bottom-down");
-            if (btnBottomDown) {
-                btnBottomDown.addEventListener("click", () => {
-                    if (this._config.entity_top) {
-                        this._call("set_cover_position", this._config.entity_top, 1);
-                    }
-                    this._call("set_cover_position", this._config.entity_bottom, 1);
-                });
-            }
-        }
-
-        this._setupPickerDrag("bottom");
-        this._updateWrapperStyle();
-
-        if (this._sliderBox) {
-            new ResizeObserver(() => {
-                this._updateStates();
-            }).observe(this._sliderBox);
-        }
-    }
-
-    _updateWrapperStyle() {
-        if (this._wrapper) {
-            this._wrapper.style.justifyContent = this._hasButtons ? 'flex-start' : 'center';
-        }
-    }
-
-    _setupPickerDrag(type) {
-        const pickerElement = type === "top" ? this._pickerTop : this._pickerBottom;
-        const otherPickerElement = type === "top" ? this._pickerBottom : (this._config.entity_top ? this._pickerTop : null);
-        if (!pickerElement) return;
-
-        let isDragging = false;
-
-        const handleStart = (e) => {
-            if (this._isCardDisabled()) return;
-
-            isDragging = true;
-            if (type === "top") this._isDraggingTop = true;
-            else this._isDraggingBottom = true;
-
-            e.stopPropagation();
-            if (e.cancelable) e.preventDefault();
-
-            document.addEventListener("mousemove", handleMove);
-            document.addEventListener("mouseup", handleEnd);
-            document.addEventListener("touchmove", handleMove, {
-                passive: false
-            });
-            document.addEventListener("touchend", handleEnd);
-        };
-
-        const handleMove = (e) => {
-            if (!isDragging) return;
-            if (e.cancelable) e.preventDefault();
-
-            const sliderBoxRect = this._sliderBox.getBoundingClientRect();
-            let clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
-            let y = clientY - sliderBoxRect.top - (pickerElement.offsetHeight / 2);
-            y = Math.max(0, Math.min(sliderBoxRect.height - pickerElement.offsetHeight, y));
-
-            if (otherPickerElement) {
-                const otherY = parseFloat(getComputedStyle(otherPickerElement).top);
-                if (type === "top") {
-                    y = Math.min(y, otherY - this._pickerHeight);
-                } else {
-                    y = Math.max(y, otherY + this._pickerHeight);
-                }
-            }
-
-            pickerElement.style.top = `${y}px`;
-            this._updateCoveredArea();
-        };
-
-        const handleEnd = (e) => {
-            if (!isDragging) return;
-            isDragging = false;
-
-            document.removeEventListener("mousemove", handleMove);
-            document.removeEventListener("mouseup", handleEnd);
-            document.removeEventListener("touchmove", handleMove);
-            document.removeEventListener("touchend", handleEnd);
-
-            const sliderBoxRect = this._sliderBox.getBoundingClientRect();
-            const pickerY = parseFloat(getComputedStyle(pickerElement).top);
-            const trackHeight = sliderBoxRect.height - pickerElement.offsetHeight;
-            const normalizedY = trackHeight > 0 ? pickerY / trackHeight : 0;
-
-            let position;
-
-            if (type === "top") {
-                // Her er logikken for TOP rullet tilbage til originalen
-                position = Math.round(Math.max(0, Math.min(1, normalizedY)) * 100);
-                
-                this._userInteractedTop = true;
-                this._lastSetTopPosition = position;
-                if (this._config.entity_top) {
-                    this._call("set_cover_position", this._config.entity_top, position);
-                }
-                this._isDraggingTop = false;
-            } else {
-                // Logik for BOTTOM med "collision fix" for at nå 100%
-                
-                // 1. Beregn visuelt loft
-                const visualTopLimit = this._pickerTop 
-                    ? parseFloat(getComputedStyle(this._pickerTop).top) + this._pickerHeight 
-                    : 0;
-                const currentTop = parseFloat(getComputedStyle(pickerElement).top);
-
-                // 2. Hvis vi rammer det øverste håndtag (eller loftet), send 100%
-                if (currentTop <= visualTopLimit + 2) {
-                    position = 100;
-                } else {
-                    position = Math.round(Math.max(0, Math.min(1, (1 - normalizedY))) * 100);
-                }
-
-                this._userInteractedBottom = true;
-                this._lastSetBottomPosition = position;
-                this._call("set_cover_position", this._config.entity_bottom, position);
-                this._isDraggingBottom = false;
-            }
-        };
-
-        pickerElement.addEventListener("mousedown", handleStart);
-        pickerElement.addEventListener("touchstart", handleStart, {
-            passive: false
-        });
-    }
-
-    _updateStates() {
-        const topState = this._hass.states[this._config.entity_top]?.attributes.current_position;
-        const bottomState = this._hass.states[this._config.entity_bottom]?.attributes.current_position;
-        const rect = this._sliderBox?.getBoundingClientRect();
-        const sliderHeight = rect && rect.height > 0 ? rect.height : 150;
-        const pickerHeight = this._pickerHeight;
-        const tolerance = 2;
-
-        this._updateCardInteractionState();
-
-        if (this._pickerTop && topState !== undefined && !this._isDraggingTop &&
-            (!this._userInteractedTop || (this._lastSetTopPosition !== null &&
-                Math.abs(topState - this._lastSetTopPosition) <= tolerance))) {
-
-            // Rullet tilbage til original logik: 0% = top, 100% = bund
-            const topY = (topState / 100) * (sliderHeight - pickerHeight);
-            
-            this._pickerTop.style.top = `${topY}px`;
-            this._userInteractedTop = false;
-            this._lastSetTopPosition = null;
-        }
-
-        if (this._pickerBottom && bottomState !== undefined && !this._isDraggingBottom &&
-            (!this._userInteractedBottom || (this._lastSetBottomPosition !== null &&
-                Math.abs(bottomState - this._lastSetBottomPosition) <= tolerance))) {
-
-            // Bund logik (uændret)
-            let targetBottomY = (bottomState / 100) * (sliderHeight - pickerHeight);
-            let finalBottomY = sliderHeight - pickerHeight - targetBottomY;
-
-            if (this._pickerTop) {
-                const topY = parseFloat(this._pickerTop.style.top || 0);
-                finalBottomY = Math.max(topY + this._pickerHeight, finalBottomY);
-            }
-
-            this._pickerBottom.style.top = `${finalBottomY}px`;
-            this._userInteractedBottom = false;
-            this._lastSetBottomPosition = null;
-        }
-
-        this._updateCoveredArea();
-    }
-
-    _isCardDisabled() {
-        if (this._disableIfSensorOpen) {
-            const sensorState = this._hass.states[this._disableIfSensorOpen];
-            return sensorState && sensorState.state === 'on';
-        }
-        return false;
-    }
-
-    _updateCardInteractionState() {
-        if (this._wrapper) {
-            if (this._isCardDisabled()) {
-                this._wrapper.classList.add('disabled');
-            } else {
-                this._wrapper.classList.remove('disabled');
-            }
-        }
-    }
-
-    _updateCoveredArea() {
-        const rect = this._sliderBox?.getBoundingClientRect();
-        if (!rect || rect.height === 0) return;
-
-        const pickerTopY = this._pickerTop ? parseFloat(this._pickerTop.style.top || 0) : 0;
-        const bottomOfSliderBox = rect.height - this._pickerHeight;
-        const pickerBottomY = this._pickerBottom ?
-            parseFloat(this._pickerBottom.style.top || bottomOfSliderBox) :
-            bottomOfSliderBox;
-
-        const topOfCovered = this._pickerTop ? pickerTopY : 0;
-        const heightOfCovered = Math.max(0, pickerBottomY - topOfCovered);
-
-        requestAnimationFrame(() => {
-            this._coveredArea.style.top = `${topOfCovered}px`;
-            this._coveredArea.style.height = `${heightOfCovered}px`;
-        });
-    }
-
-    _call(service, entity, position = null) {
-        if (!entity) return;
-
-        if (this._isCardDisabled()) {
-            console.warn(`TDBUMushroomStyleCard: Forsøg på at styre ${entity} blokeret.`);
-            return;
-        }
-
-        const [domain, svc] = ["cover", service];
-        const data = {
-            entity_id: entity
-        };
-        if (position !== null) data.position = position;
-        this._hass.callService(domain, svc, data);
-    }
+/** Turn a 1.x config (entity_top/entity_bottom/disable_if_sensor_open) into a 2.x config. */
+function migrateLegacy(c) {
+  if (!c || c.rooms || !c.entity_bottom) return c;
+  return {
+    type: c.type,
+    show_header: false,
+    rooms: [{
+      name: c.name || "",
+      bottom: c.entity_bottom,
+      ...(c.entity_top ? { top: c.entity_top } : {}),
+      ...(c.disable_if_sensor_open ? { door: c.disable_if_sensor_open, door_side: "both" } : {}),
+      ...(c.show_buttons === false ? { buttons: [] } : {}),
+    }],
+  };
 }
 
-customElements.define('tdbu-mushroom-style-card', TDBUMushroomStyleCard);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+
+class TdbuBlindCard extends HTMLElement {
+  static getConfigElement() { return document.createElement("tdbu-blind-card-editor"); }
+
+  static getStubConfig(hass) {
+    const covers = Object.keys((hass && hass.states) || {}).filter(e => e.startsWith("cover."));
+    const bottom = covers.find(e => /bottom/i.test(e)) || covers[0] || "cover.my_blind_bottom";
+    const top = covers.find(e => /top/i.test(e) && e.replace(/top/i, "") === bottom.replace(/bottom/i, ""));
+    return { rooms: [{ name: "Living room", bottom, ...(top ? { top } : {}) }] };
+  }
+
+  setConfig(config) {
+    const c = migrateLegacy(config);
+    if (!c || !Array.isArray(c.rooms) || !c.rooms.length) {
+      throw new Error("tdbu-blind-card: add at least one room under 'rooms'");
+    }
+    c.rooms.forEach((r, i) => {
+      if (!r || !(r.bottom || (r.left_bottom && r.right_bottom))) throw new Error(`tdbu-blind-card: room ${i + 1} needs a 'bottom' cover entity (or both 'left_bottom' and 'right_bottom')`);
+    });
+    this._config = c;
+    this._pending = {};
+    this._drag = null;
+    this._rooms = c.rooms.map((r, i) => {
+      const split = !!(r.left_bottom && r.right_bottom);
+      const panes = split
+        ? [{ name: r.left_name, top: r.left_top, bottom: r.left_bottom }, { name: r.right_name, top: r.right_top, bottom: r.right_bottom }]
+        : [{ top: r.top, bottom: r.bottom }];
+      const side = r.door_side || "both";
+      const doorPanes = !r.door ? [] : !split ? [0] : side === "left" ? [0] : side === "right" ? [1] : [0, 1];
+      const buttons = (Array.isArray(r.buttons) ? r.buttons : DEFAULT_BUTTONS).filter(Boolean);
+      return { id: `r${i}`, cfg: r, split, panes, both: { top: r.top, bottom: r.bottom }, doorPanes, buttons, floor: r.floor || "" };
+    });
+    const ents = new Set();
+    this._rooms.forEach(r => {
+      if (r.cfg.door) ents.add(r.cfg.door);
+      r.panes.concat([r.both]).forEach(p => { if (p.top) ents.add(p.top); if (p.bottom) ents.add(p.bottom); });
+    });
+    this._ents = [...ents];
+    this._single = this._rooms.length === 1;
+    this._header = c.show_header !== undefined ? !!c.show_header : !this._single;
+    this._built = false;
+    if (this._hass) { this._build(); this._update(); }
+  }
+
+  set hass(hass) {
+    const old = this._hass;
+    this._hass = hass;
+    if (!this._config) return;
+    if (!this._built || (old && old.language !== hass.language)) { this._build(); this._update(); return; }
+    if (!old || this._ents.some(e => old.states[e] !== hass.states[e])) this._update();
+  }
+
+  getCardSize() { return this._single ? 5 : 3 + this._rooms.length * 4; }
+  getGridOptions() { return this._single ? { columns: 12, min_columns: 6 } : { columns: "full" }; }
+
+  // ---------- text ----------
+  get _t() {
+    const lang = String(this._config.language || (this._hass && ((this._hass.locale && this._hass.locale.language) || this._hass.language)) || "en");
+    return STRINGS[lang.slice(0, 2)] || STRINGS.en;
+  }
+  _label(name) {
+    if (typeof name === "string" && name.startsWith("@")) return this._t[name.slice(1)] || name.slice(1);
+    return name || "";
+  }
+
+  // ---------- layout ----------
+  _build() {
+    if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+    const c = this._config, t = this._t;
+    const grip = (rid, tg, w) => `<div class="gr" data-g="${rid}|${tg}|${w}" role="slider" tabindex="0" aria-label="${w === "t" ? t.topRail : t.bottomRail}"><span></span><b></b></div>`;
+    const frame = (r, tg, wd) => {
+      const idx = tg === "all" ? r.panes.map((_, i) => i) : [+tg];
+      const hasTop = tg === "all" ? !!(r.both.top || r.panes.some(p => p.top)) : !!r.panes[+tg].top;
+      let h = idx.map(i => `<div class="pn"><div class="fb" data-fb="${r.id}|${tg}|${i}"></div>${tg === "all" && r.split ? `<div class="rl" data-rl="${r.id}|${i}|t"></div><div class="rl" data-rl="${r.id}|${i}|b"></div>` : ""}</div>`).join("");
+      h += (hasTop ? grip(r.id, tg, "t") : "") + grip(r.id, tg, "b");
+      return `<div class="fr" data-fr="${r.id}|${tg}" style="width:${wd}px">${h}</div><div class="sill" style="width:${wd + 12}px"></div>`;
+    };
+    const room = r => {
+      const k = r.cfg;
+      const minis = r.split ? `<div class="sep"></div>` + r.panes.map((p, i) => `<div class="col">${frame(r, String(i), 40)}<div class="lb">${esc(p.name || (i ? t.right : t.left))}</div></div>`).join("") : "";
+      const btns = r.buttons.map((b, i) => `<button class="kn" data-k="${r.id}|${i}"><ha-icon icon="${esc(b.icon || "mdi:blinds")}"></ha-icon><span>${esc(this._label(b.name))}</span></button>`).join("");
+      return `<ha-card class="rum" data-rum="${r.id}">
+        <div class="hd"><div class="ico"><ha-icon icon="${esc(k.icon || "mdi:blinds-horizontal")}"></ha-icon></div>
+          <div class="tt"><div class="nm">${esc(k.name || this._friendly(k.bottom || k.left_bottom))}</div><div class="st" data-st="${r.id}"></div></div>
+          <span class="pill" data-door="${r.id}" hidden><ha-icon icon="mdi:door-open"></ha-icon>${esc(t.doorOpen)}</span></div>
+        <div class="win"><div class="col">${frame(r, "all", r.split ? 120 : 64)}<div class="lb">${r.split ? esc(t.both) : ""}</div></div>${minis}</div>
+        ${btns ? `<div class="seg">${btns}</div>` : ""}
+        <div class="msg" data-msg="${r.id}"></div>
+      </ha-card>`;
+    };
+    const menu = (c.menu || []).map((m, i) => `<button class="mi" data-m="${i}"><ha-icon icon="${esc(m.icon || "mdi:play")}"></ha-icon>${esc(m.name || m.entity)}</button>`).join("");
+    const header = !this._header ? "" : `
+      <ha-card class="hus">
+        <div class="ico"><ha-icon icon="${esc(c.icon || "mdi:home")}"></ha-icon></div>
+        <div class="tt"><div class="nm">${esc(c.title || t.house)}</div><div class="st" data-hus></div></div>
+        ${c.all_up || c.all_down ? `<div class="seg hseg">
+          ${c.all_up ? `<button class="kn" data-alle="up"><ha-icon icon="mdi:arrow-collapse-up"></ha-icon><span>${esc(t.allUp)}</span></button>` : ""}
+          ${c.all_down ? `<button class="kn" data-alle="down"><ha-icon icon="mdi:arrow-collapse-down"></ha-icon><span>${esc(t.allDown)}</span></button>` : ""}
+        </div>` : ""}
+        ${menu ? `<div class="mw"><button class="dots" data-menu aria-label="${esc(t.more)}"><ha-icon icon="mdi:dots-horizontal"></ha-icon></button><div class="mn" hidden>${menu}</div></div>` : ""}
+      </ha-card>
+      <div class="msg husmsg" data-husmsg></div>`;
+    const floors = [];
+    this._rooms.forEach(r => { let f = floors.find(x => x.name === r.floor); if (!f) floors.push(f = { name: r.floor, icon: r.cfg.floor_icon, rooms: [] }); f.rooms.push(r); });
+    this.shadowRoot.innerHTML = `<style>${TdbuBlindCard.css}</style>${header}
+      ${floors.map(f => `${f.name ? `<div class="floor"><ha-icon icon="${esc(f.icon || "mdi:stairs")}"></ha-icon>${esc(f.name)}</div>` : ""}
+        <div class="rooms${this._single ? " single" : ""}">${f.rooms.map(room).join("")}</div>`).join("")}`;
+    // Listeners only once: Home Assistant may call setConfig again (e.g. while editing),
+    // and duplicate listeners would send every command twice.
+    if (!this._bound) { this._bind(); this._bound = true; }
+    // Hide button icons when the card is too narrow to show the full text (e.g. 4 buttons on a phone).
+    if (this._ro) this._ro.disconnect();
+    this._ro = new ResizeObserver(list => list.forEach(en => {
+      const n = en.target.querySelectorAll(".seg .kn").length;
+      en.target.classList.toggle("smal", en.contentRect.width < n * 86);
+    }));
+    this.shadowRoot.querySelectorAll(".rum").forEach(el => this._ro.observe(el));
+    this._built = true;
+  }
+
+  _bind() {
+    const root = this.shadowRoot;
+    root.addEventListener("click", e => this._onClick(e));
+    root.addEventListener("pointerdown", e => this._onDown(e));
+    root.addEventListener("pointermove", e => this._onMove(e));
+    root.addEventListener("pointerup", e => this._onUp(e));
+    root.addEventListener("pointercancel", e => this._onUp(e, true));
+    root.addEventListener("keydown", e => this._onKey(e));
+  }
+
+  // ---------- state ----------
+  _friendly(e) { const s = this._hass && this._hass.states[e]; return (s && s.attributes.friendly_name) || e || ""; }
+  _pos(e) {
+    if (!e) return null;
+    const p = this._pending[e];
+    const s = this._hass && this._hass.states[e];
+    const cur = s && typeof s.attributes.current_position === "number" ? s.attributes.current_position : null;
+    if (p) {
+      if (Date.now() > p.until || (cur !== null && Math.abs(cur - p.pos) <= 3)) delete this._pending[e];
+      else return p.pos;
+    }
+    return cur;
+  }
+  _pane(p) { // -> {t, b} in % from the top of the window, or null
+    const top = p.top ? this._pos(p.top) : 0;
+    const bot = this._pos(p.bottom);
+    if (top === null || bot === null) return null;
+    return { t: top, b: Math.max(top + 1, 100 - bot) };
+  }
+  _doorOpen(r) { const d = r.cfg.door && this._hass && this._hass.states[r.cfg.door]; return !!(d && d.state === "on"); }
+  _moving(r) {
+    return r.panes.concat([r.both]).some(p => [p.top, p.bottom].some(e => { const s = e && this._hass.states[e]; return s && (s.state === "opening" || s.state === "closing"); }));
+  }
+  _status(r, ps) {
+    const t = this._t;
+    const missing = r.panes.concat([r.both]).flatMap(p => [p.top, p.bottom]).find(e => e && !this._hass.states[e]);
+    if (missing) return t.missing(missing);
+    if (ps.some(x => !x)) return t.unknown;
+    if (this._moving(r)) return t.moving;
+    if (ps.some(x => Math.abs(x.t - ps[0].t) > 4 || Math.abs(x.b - ps[0].b) > 4)) return t.differ;
+    const cov = Math.round(ps[0].b - ps[0].t);
+    if (ps[0].t <= 3 && cov >= 88) return t.isDown;
+    if (cov <= 12) return t.isUp;
+    return t.covered(cov);
+  }
+  _say(rid, text) {
+    const el = this.shadowRoot.querySelector(rid === "hus" ? "[data-husmsg]" : `[data-msg="${rid}"]`);
+    if (el) el.textContent = text;
+    clearTimeout(this["_mt" + rid]);
+    this["_mt" + rid] = setTimeout(() => { if (el) el.textContent = ""; }, 7000);
+  }
+
+  // ---------- drawing ----------
+  _update() {
+    if (!this._hass || !this.shadowRoot || !this._built) return;
+    const root = this.shadowRoot, t = this._t;
+    let down = 0; const open = [];
+    this._rooms.forEach(r => {
+      const ps = r.panes.map((p, i) => (this._drag && this._drag.r === r && this._drag.vals[i]) || this._pane(p));
+      const st = this._status(r, ps);
+      if (st === t.isDown) down++;
+      const door = this._doorOpen(r);
+      if (door) open.push(r.cfg.name || this._friendly(r.cfg.bottom || r.cfg.left_bottom));
+      const eq = !ps.some(x => !x || Math.abs(x.t - ps[0].t) > 4 || Math.abs(x.b - ps[0].b) > 4);
+      root.querySelectorAll(`[data-fb^="${r.id}|"]`).forEach(f => {
+        const x = ps[+f.dataset.fb.split("|")[2]];
+        f.style.top = (x ? x.t : 0) + "%"; f.style.height = (x ? x.b - x.t : 0) + "%";
+      });
+      root.querySelectorAll(`[data-rl^="${r.id}|"]`).forEach(l => {
+        const [, i, w] = l.dataset.rl.split("|"); const x = ps[+i];
+        l.hidden = eq || !x; if (x) l.style.top = `calc(${w === "t" ? x.t : x.b}% - ${w === "t" ? 0 : 3}px)`;
+      });
+      root.querySelectorAll(`[data-g^="${r.id}|"]`).forEach(g => {
+        const [, tg, w] = g.dataset.g.split("|");
+        const sel = (tg === "all" ? ps : [ps[+tg]]).filter(Boolean);
+        if (!sel.length) return;
+        const v = w === "t" ? Math.min(...sel.map(x => x.t)) : Math.max(...sel.map(x => x.b));
+        g.style.top = v + "%"; g.classList.toggle("dim", tg === "all" && !eq);
+        g.setAttribute("aria-valuenow", String(Math.round(w === "t" ? v : 100 - v)));
+      });
+      const stEl = root.querySelector(`[data-st="${r.id}"]`);
+      if (stEl && !(this._drag && this._drag.r === r)) stEl.textContent = st;
+      const pill = root.querySelector(`[data-door="${r.id}"]`); if (pill) pill.hidden = !door;
+      root.querySelectorAll(`[data-k^="${r.id}|"]`).forEach(b => {
+        const k = r.buttons[+b.dataset.k.split("|")[1]];
+        const lock = door && this._buttonLowers(r, k);
+        b.classList.toggle("lock", lock);
+        b.querySelector("ha-icon").setAttribute("icon", lock ? "mdi:lock" : (k.icon || "mdi:blinds"));
+      });
+    });
+    const hus = root.querySelector("[data-hus]");
+    if (hus) hus.textContent = t.roomsDown(down, this._rooms.length) + (open.length ? ` · ${t.doorOpenList(open.join(", "))}` : "");
+  }
+
+  // ---------- actions ----------
+  _call(domain, service, data) {
+    if (this._config.debug) console.info("tdbu-blind-card", domain, service, data);
+    return this._hass.callService(domain, service, data);
+  }
+  _flash(el) { el.classList.add("sent"); setTimeout(() => el.classList.remove("sent"), 1200); }
+  _find(e, sel) { // walks composedPath, so clicks inside <ha-icon> (own shadow DOM) also count
+    for (const n of e.composedPath()) { if (n === this.shadowRoot) break; if (n.matches && n.matches(sel)) return n; }
+    return null;
+  }
+  _runEntity(entity, data) {
+    if (!entity) return;
+    const dom = entity.split(".")[0];
+    if (dom === "automation") this._call("automation", "trigger", Object.assign({ entity_id: entity }, data || {}));
+    else if (dom === "scene") this._call("scene", "turn_on", { entity_id: entity });
+    else if (dom === "button" || dom === "input_button") this._call(dom, "press", { entity_id: entity });
+    else this._call("script", "turn_on", Object.assign({ entity_id: entity }, data ? { variables: data } : {}));
+  }
+  // Does this button move a bottom rail down? Script/scene buttons say so with door_check: true.
+  _buttonLowers(r, b) {
+    if (b.door_check !== undefined) return !!b.door_check;
+    if (!b.position || b.position.bottom === undefined || !r.doorPanes.length) return false;
+    return r.doorPanes.some(i => { const cur = this._pos(r.panes[i].bottom); return cur === null || b.position.bottom < cur - 1; });
+  }
+
+  _onClick(e) {
+    const el = this._find(e, "[data-k],[data-alle],[data-menu],[data-m]");
+    const mn = this.shadowRoot.querySelector(".mn");
+    if (!el) { if (mn) mn.hidden = true; return; }
+    const t = this._t;
+    if (el.dataset.menu !== undefined) { mn.hidden = !mn.hidden; return; }
+    if (el.dataset.m !== undefined) {
+      const m = this._config.menu[+el.dataset.m]; mn.hidden = true;
+      this._runEntity(m.entity, m.data);
+      this._say("hus", t.started(m.name || m.entity));
+      return;
+    }
+    if (el.dataset.alle) {
+      const up = el.dataset.alle === "up";
+      this._runEntity(up ? this._config.all_up : this._config.all_down);
+      this._flash(el);
+      const skip = up ? [] : this._rooms.filter(r => this._doorOpen(r)).map(r => r.cfg.name || this._friendly(r.cfg.bottom || r.cfg.left_bottom));
+      this._say("hus", skip.length ? t.skipped(skip.join(", ")) : (up ? t.allGoingUp : t.allGoingDown));
+      return;
+    }
+    const [rid, i] = el.dataset.k.split("|");
+    const r = this._rooms.find(x => x.id === rid); const b = r.buttons[+i];
+    if (this._doorOpen(r) && this._buttonLowers(r, b)) { this._say(rid, t.doorBlocked); return; }
+    if (b.action === "stop") {
+      new Set(r.panes.concat([r.both]).flatMap(p => [p.top, p.bottom]).filter(Boolean))
+        .forEach(ent => this._call("cover", "stop_cover", { entity_id: ent }));
+    } else if (b.position) {
+      const tgt = this._targets(r);
+      if (b.position.top !== undefined) tgt.top.forEach(ent => this._call("cover", "set_cover_position", { entity_id: ent, position: +b.position.top }));
+      if (b.position.bottom !== undefined) tgt.bottom.forEach(ent => this._call("cover", "set_cover_position", { entity_id: ent, position: +b.position.bottom }));
+    } else {
+      this._runEntity(b.script || b.entity, b.data);
+    }
+    this._flash(el);
+  }
+  // Entities to move for the whole room: the "Both" group if given, otherwise each blind.
+  _targets(r) {
+    const pick = key => r.both[key] ? [r.both[key]] : r.panes.map(p => p[key]).filter(Boolean);
+    return { top: pick("top"), bottom: pick("bottom") };
+  }
+
+  _onDown(e) {
+    const g = this._find(e, "[data-g]"); if (!g) return;
+    const [rid, tg, w] = g.dataset.g.split("|");
+    const r = this._rooms.find(x => x.id === rid);
+    const idx = tg === "all" ? r.panes.map((_, i) => i) : [+tg];
+    const cur = r.panes.map(p => this._pane(p));
+    if (idx.some(i => !cur[i])) return;
+    const fr = this.shadowRoot.querySelector(`[data-fr="${rid}|${tg}"]`);
+    this._drag = { r, tg, w, idx, rect: fr.getBoundingClientRect(), start: cur.map(x => x && { ...x }), vals: cur.map(x => x && { ...x }), blocked: false };
+    try { g.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events without an active pointer */ }
+    this.shadowRoot.querySelector(`[data-rum="${rid}"]`).classList.add("dragging");
+    e.preventDefault();
+  }
+
+  _apply(v) { // move the rail to v (% from the top) for the chosen blinds, respecting door and gap limits
+    const d = this._drag, r = d.r;
+    const door = this._doorOpen(r) ? r.doorPanes.filter(i => d.idx.includes(i)) : [];
+    if (d.w === "t") {
+      v = Math.max(0, Math.min(v, ...d.idx.map(i => d.vals[i].b - GAP)));
+      d.idx.forEach(i => { d.vals[i].t = v; });
+    } else {
+      v = Math.min(100, Math.max(v, ...d.idx.map(i => d.vals[i].t + GAP)));
+      if (door.length) {
+        const limit = Math.min(...door.map(i => d.start[i].b));
+        if (v > limit) { v = limit; if (!d.blocked) { d.blocked = true; this._say(r.id, this._t.doorBlocked); } }
+      }
+      d.idx.forEach(i => { d.vals[i].b = v; });
+    }
+    return v;
+  }
+
+  _onMove(e) {
+    const d = this._drag; if (!d) return;
+    this._apply(Math.round((e.clientY - d.rect.top) / d.rect.height * 100));
+    this._update();
+    const t = this._t;
+    const st = this.shadowRoot.querySelector(`[data-st="${d.r.id}"]`);
+    const who = d.tg === "all" ? (d.r.split ? t.both : "") : (d.r.panes[+d.tg].name || (+d.tg ? t.right : t.left));
+    const cov = Math.round(d.vals[d.idx[0]].b - d.vals[d.idx[0]].t);
+    if (st) st.textContent = `${d.w === "t" ? t.topRail : t.bottomRail}${who ? " · " + who.toLowerCase() : ""} · ${t.covered(cov)}`;
+  }
+
+  _onUp(e, cancel) {
+    const d = this._drag; if (!d) return;
+    this._drag = null;
+    this.shadowRoot.querySelector(`[data-rum="${d.r.id}"]`).classList.remove("dragging");
+    if (!cancel) this._send(d);
+    this._update();
+  }
+
+  _send(d) {
+    const r = d.r, i0 = d.idx[0];
+    const moved = d.idx.some(i => Math.abs(d.w === "t" ? d.vals[i].t - d.start[i].t : d.vals[i].b - d.start[i].b) >= 1);
+    if (!moved) return;
+    let pos;
+    if (d.w === "t") pos = Math.round(d.vals[i0].t);
+    else pos = d.vals[i0].b <= Math.max(...d.idx.map(i => d.vals[i].t)) + GAP + 1 ? 100 : Math.round(100 - d.vals[i0].b);
+    const key = d.w === "t" ? "top" : "bottom";
+    const lower = d.w === "b" && d.idx.some(i => d.vals[i].b > d.start[i].b + 0.5);
+    if (lower && this._doorOpen(r) && r.doorPanes.some(i => d.idx.includes(i))) { this._say(r.id, this._t.doorBlocked); return; }
+    const targets = d.tg === "all" ? this._targets(r)[key] : [r.panes[i0][key]].filter(Boolean);
+    targets.forEach(ent => this._call("cover", "set_cover_position", { entity_id: ent, position: pos }));
+    d.idx.forEach(i => { const ent = r.panes[i][key]; if (ent) this._pending[ent] = { pos, until: Date.now() + PENDING_MS }; });
+  }
+
+  _onKey(e) {
+    const t = e.composedPath()[0];
+    if (!t.dataset || !t.dataset.g || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    e.preventDefault();
+    const [rid, tg, w] = t.dataset.g.split("|");
+    const r = this._rooms.find(x => x.id === rid);
+    const idx = tg === "all" ? r.panes.map((_, i) => i) : [+tg];
+    const cur = r.panes.map(p => this._pane(p)); if (idx.some(i => !cur[i])) return;
+    this._drag = { r, tg, w, idx, rect: null, start: cur.map(x => x && { ...x }), vals: cur.map(x => x && { ...x }), blocked: false };
+    const base = w === "t" ? Math.min(...idx.map(i => cur[i].t)) : Math.max(...idx.map(i => cur[i].b));
+    this._apply(base + (e.key === "ArrowDown" ? 5 : -5));
+    const d = this._drag; this._drag = null; this._send(d); this._update();
+  }
+}
+
+TdbuBlindCard.css = `
+:host{display:block;--gl:color-mix(in srgb,var(--primary-color,#03a9f4) 16%,var(--card-background-color,#fff));
+  --fab:var(--tdbu-fabric-color,color-mix(in srgb,#c8935a 40%,var(--card-background-color,#fff)));--frm:color-mix(in srgb,var(--primary-text-color,#222) 42%,transparent);
+  --rail:color-mix(in srgb,var(--primary-text-color,#222) 72%,transparent);--soft:color-mix(in srgb,var(--primary-text-color,#222) 6%,transparent);
+  --warn:var(--warning-color,#ffa600)}
+ha-card{padding:14px 16px}
+.hus{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.ico{width:38px;height:38px;border-radius:50%;background:var(--soft);display:flex;align-items:center;justify-content:center;color:var(--secondary-text-color);flex:none;--mdc-icon-size:20px}
+.tt{flex:1;min-width:150px}.nm{font-size:15px;font-weight:500;color:var(--primary-text-color)}
+.hus .tt{min-width:120px}
+.st{font-size:12px;color:var(--secondary-text-color);min-height:16px}
+.hd{display:flex;align-items:center;gap:10px}
+.pill{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:8px;color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent);--mdc-icon-size:14px}
+.pill[hidden],.rl[hidden],.mn[hidden]{display:none}
+.floor{display:flex;align-items:center;gap:8px;margin:20px 4px 8px;font-size:16px;font-weight:500;color:var(--primary-text-color);--mdc-icon-size:20px}
+.floor ha-icon{color:var(--secondary-text-color)}
+.rooms{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(290px,100%),1fr));gap:12px}
+.rooms>*{min-width:0}
+.rooms.single{grid-template-columns:minmax(0,1fr)}
+.win{display:flex;gap:12px;margin-top:14px;align-items:flex-start;justify-content:center}
+.col{display:flex;flex-direction:column;align-items:center}
+.sep{width:1px;align-self:stretch;background:var(--divider-color,rgba(0,0,0,.12));margin:0 2px}
+.fr{position:relative;height:124px;border:2px solid var(--frm);border-radius:4px;display:flex;gap:3px;background:var(--frm);touch-action:none}
+.sill{height:4px;border-radius:2px;background:var(--frm);margin-top:3px}
+.pn{position:relative;flex:1;background:var(--gl);overflow:hidden}
+.fb{position:absolute;left:0;right:0;background:var(--fab);transition:top .45s,height .45s}
+.dragging .fb{transition:none}
+.rl{position:absolute;left:0;right:0;height:3px;background:var(--rail);pointer-events:none}
+.gr{position:absolute;left:-7px;right:-7px;height:22px;margin-top:-10px;cursor:ns-resize;touch-action:none;display:flex;align-items:center;justify-content:center;outline:none}
+.gr span{display:block;width:100%;height:4px;border-radius:2px;background:var(--rail)}
+.gr b{position:absolute;width:24px;height:11px;border-radius:6px;background:var(--card-background-color,#fff);border:1.5px solid var(--rail)}
+.gr:focus-visible b{border-color:var(--primary-color);box-shadow:0 0 0 2px color-mix(in srgb,var(--primary-color) 35%,transparent)}
+.gr.dim{opacity:.45}
+.lb{font-size:11px;color:var(--secondary-text-color);margin-top:5px;min-height:14px}
+.seg{display:flex;border:1px solid var(--divider-color,rgba(0,0,0,.12));border-radius:10px;overflow:hidden;margin-top:14px}
+.hseg{margin-top:0}
+.kn{flex:1;min-width:0;display:flex;align-items:center;justify-content:center;gap:4px;min-height:36px;padding:0 4px;border:none;background:none;color:var(--primary-text-color);font:inherit;font-size:12.5px;cursor:pointer;--mdc-icon-size:17px;white-space:nowrap}
+.kn+.kn{border-left:1px solid var(--divider-color,rgba(0,0,0,.12))}
+.kn:hover{background:var(--soft)}
+.kn.sent{background:color-mix(in srgb,var(--primary-color) 16%,transparent)}
+.kn.lock{color:var(--secondary-text-color)}
+.kn span{overflow:hidden;text-overflow:ellipsis}
+.smal .kn:not(.lock) ha-icon{display:none}
+.hseg .kn{flex:none;padding:0 12px}
+.msg{font-size:12px;color:var(--warn);min-height:16px;margin-top:6px}
+.husmsg{margin:4px 4px 0}
+.mw{position:relative}
+.dots{border:none;background:none;color:var(--secondary-text-color);cursor:pointer;padding:6px;border-radius:50%;--mdc-icon-size:20px}
+.dots:hover{background:var(--soft)}
+.mn{position:absolute;right:0;top:38px;z-index:5;min-width:220px;background:var(--card-background-color,#fff);border:1px solid var(--divider-color,rgba(0,0,0,.12));border-radius:10px;padding:4px;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+.mi{display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;color:var(--primary-text-color);font:inherit;font-size:13px;padding:8px 10px;border-radius:8px;cursor:pointer;--mdc-icon-size:18px;text-align:left}
+.mi:hover{background:var(--soft)}
+`;
+
+/* ======================================================================================
+ * Visual editor
+ * ====================================================================================== */
+
+const ED = {
+  en: {
+    general: "General", title: "Header title", show_header: "Show whole-house header", all_up: "All up (script or scene)",
+    all_down: "All down (script or scene)", rooms: "Rooms", addRoom: "Add room", room: "Room", name: "Name", icon: "Icon",
+    floor: "Floor", bottom: "Bottom rail – cover or cover group (both blinds)",
+    top: "Top rail – cover or cover group (both blinds)", individual: "Two blinds in the window (optional)",
+    left_bottom: "Left blind – bottom", left_top: "Left blind – top", right_bottom: "Right blind – bottom",
+    right_top: "Right blind – top", door: "Door / window sensor", door_side: "Door is behind",
+    side_both: "Both blinds", side_left: "Left blind", side_right: "Right blind", buttons: "Buttons",
+    addButton: "Add button", defaults: "Use standard buttons (up · stop · down)", noButtons: "No buttons",
+    btype: "Button does", t_script: "Run a script", t_scene: "Activate a scene", t_position: "Move to a position",
+    t_stop: "Stop", script: "Script", scene: "Scene", pos_top: "Top rail", pos_top_help: "0 = rail at the top", pos_bottom: "Bottom rail",
+    pos_bottom_help: "100 = blind fully up, 0 = fully down", door_side_help: "Only this side is stopped from going down",
+    floor_help: "Rooms with the same floor are grouped under one heading", door_check: "Block when the door is open (moves the blind down)",
+    up: "Move up", downMove: "Move down", remove: "Remove", legacy: "Settings from version 1 were found and converted. Saving stores them in the new format.",
+    standardButtons: "Standard buttons are used: up, stop and down.",
+  },
+  da: {
+    general: "Generelt", title: "Overskrift", show_header: "Vis linjen for hele huset", all_up: "Alle op (script eller scene)",
+    all_down: "Alle ned (script eller scene)", rooms: "Rum", addRoom: "Tilføj rum", room: "Rum", name: "Navn", icon: "Ikon",
+    floor: "Etage", bottom: "Nederste skinne – gardin eller gardingruppe (begge gardiner)",
+    top: "Øverste skinne – gardin eller gardingruppe (begge gardiner)", individual: "To gardiner i vinduet (valgfrit)",
+    left_bottom: "Venstre gardin – nederst", left_top: "Venstre gardin – øverst", right_bottom: "Højre gardin – nederst",
+    right_top: "Højre gardin – øverst", door: "Dør- eller vinduessensor", door_side: "Døren sidder bag",
+    side_both: "Begge gardiner", side_left: "Venstre gardin", side_right: "Højre gardin", buttons: "Knapper",
+    addButton: "Tilføj knap", defaults: "Brug standardknapper (op · stop · ned)", noButtons: "Ingen knapper",
+    btype: "Knappen skal", t_script: "Køre et script", t_scene: "Aktivere en scene", t_position: "Køre til en position",
+    t_stop: "Stoppe", script: "Script", scene: "Scene", pos_top: "Øverste skinne", pos_top_help: "0 = skinnen helt oppe", pos_bottom: "Nederste skinne",
+    pos_bottom_help: "100 = gardinet helt oppe, 0 = helt nede", door_side_help: "Kun den side stoppes i at køre ned",
+    floor_help: "Rum med samme etage samles under én overskrift", door_check: "Spær når døren er åben (kører gardinet ned)",
+    up: "Flyt op", downMove: "Flyt ned", remove: "Fjern", legacy: "Der blev fundet indstillinger fra version 1, og de er omsat. Når du gemmer, gemmes de i det nye format.",
+    standardButtons: "Standardknapperne bruges: op, stop og ned.",
+  },
+};
+
+async function ensureHaForm() {
+  if (customElements.get("ha-form") && customElements.get("ha-entity-picker")) return;
+  try {
+    const helpers = await window.loadCardHelpers();
+    const card = await helpers.createCardElement({ type: "entities", entities: [] });
+    await card.constructor.getConfigElement();
+  } catch (_) { /* older frontends load ha-form on their own */ }
+}
+
+class TdbuBlindCardEditor extends HTMLElement {
+  setConfig(config) {
+    if (this._lastFired && JSON.stringify(config) === this._lastFired) return; // our own change coming back
+    const migrated = migrateLegacy(config);
+    this._legacy = migrated !== config;
+    this._config = JSON.parse(JSON.stringify(migrated || {}));
+    if (!Array.isArray(this._config.rooms)) this._config.rooms = [];
+    if (!this._open) this._open = new Set([0]);
+    this._render();
+  }
+  set hass(hass) {
+    this._hass = hass;
+    this.shadowRoot && this.shadowRoot.querySelectorAll("ha-form").forEach(f => { f.hass = hass; });
+  }
+  connectedCallback() { ensureHaForm().then(() => this._render()); }
+
+  get _t() {
+    const l = String((this._hass && ((this._hass.locale && this._hass.locale.language) || this._hass.language)) || "en").slice(0, 2);
+    return ED[l] || ED.en;
+  }
+
+  _fire() {
+    if (this._legacy) { delete this._config.show_header; this._legacy = false; }
+    const c = JSON.parse(JSON.stringify(this._config));
+    this._lastFired = JSON.stringify(c);
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: c }, bubbles: true, composed: true }));
+  }
+
+  _form(data, schema, onChange) {
+    const f = document.createElement("ha-form");
+    f.hass = this._hass; f.data = data; f.schema = schema;
+    f.computeLabel = s => this._t[s.name] || s.label || s.name;
+    f.computeHelper = s => this._t[`${s.name}_help`];
+    f.addEventListener("value-changed", ev => { ev.stopPropagation(); onChange(ev.detail.value); });
+    return f;
+  }
+
+  _render() {
+    if (!this._config) return;
+    if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+    const t = this._t, c = this._config, root = this.shadowRoot;
+    root.innerHTML = `<style>${TdbuBlindCardEditor.css}</style>
+      ${this._legacy ? `<div class="note">${esc(t.legacy)}</div>` : ""}
+      <div class="sec"><div class="h">${esc(t.general)}</div><div data-general></div></div>
+      <div class="sec"><div class="h">${esc(t.rooms)}</div><div data-rooms></div>
+        <button class="add" data-act="addRoom"><ha-icon icon="mdi:plus"></ha-icon>${esc(t.addRoom)}</button></div>`;
+
+    const general = this._form(
+      { title: c.title, show_header: c.show_header !== undefined ? c.show_header : c.rooms.length > 1, all_up: c.all_up, all_down: c.all_down },
+      [
+        { name: "title", selector: { text: {} } },
+        { name: "show_header", selector: { boolean: {} } },
+        { type: "grid", name: "", schema: [
+          { name: "all_up", selector: { entity: { domain: ["script", "scene"] } } },
+          { name: "all_down", selector: { entity: { domain: ["script", "scene"] } } },
+        ] },
+      ],
+      v => { ["title", "all_up", "all_down"].forEach(k => { if (v[k]) c[k] = v[k]; else delete c[k]; }); c.show_header = !!v.show_header; this._fire(); });
+    root.querySelector("[data-general]").appendChild(general);
+
+    const list = root.querySelector("[data-rooms]");
+    c.rooms.forEach((r, i) => list.appendChild(this._roomEl(r, i)));
+    root.querySelector('[data-act="addRoom"]').addEventListener("click", () => {
+      c.rooms.push({ name: `${t.room} ${c.rooms.length + 1}`, bottom: "" });
+      this._open.add(c.rooms.length - 1); this._fire(); this._render();
+    });
+  }
+
+  _roomEl(r, i) {
+    const t = this._t, c = this._config;
+    const det = document.createElement("details");
+    det.open = this._open.has(i);
+    det.addEventListener("toggle", () => { det.open ? this._open.add(i) : this._open.delete(i); });
+    det.innerHTML = `<summary><ha-icon icon="${esc(r.icon || "mdi:blinds-horizontal")}"></ha-icon><span class="sn">${esc(r.name || `${t.room} ${i + 1}`)}</span>
+      <span class="tools">
+        <button data-act="up" title="${esc(t.up)}" ${i === 0 ? "disabled" : ""}><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+        <button data-act="down" title="${esc(t.downMove)}" ${i === c.rooms.length - 1 ? "disabled" : ""}><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+        <button data-act="del" title="${esc(t.remove)}"><ha-icon icon="mdi:delete-outline"></ha-icon></button></span></summary>
+      <div class="body"><div data-form></div><div class="h2">${esc(t.buttons)}</div><div data-buttons></div>
+      <div class="row"><button class="add" data-act="addBtn"><ha-icon icon="mdi:plus"></ha-icon>${esc(t.addButton)}</button>
+      ${Array.isArray(r.buttons) ? `<button class="add" data-act="defaults"><ha-icon icon="mdi:restore"></ha-icon>${esc(t.defaults)}</button>` : ""}</div></div>`;
+
+    const tools = (act, fn) => det.querySelector(`[data-act="${act}"]`).addEventListener("click", ev => { ev.preventDefault(); ev.stopPropagation(); fn(); });
+    tools("up", () => { [c.rooms[i - 1], c.rooms[i]] = [c.rooms[i], c.rooms[i - 1]]; this._fire(); this._render(); });
+    tools("down", () => { [c.rooms[i + 1], c.rooms[i]] = [c.rooms[i], c.rooms[i + 1]]; this._fire(); this._render(); });
+    tools("del", () => { c.rooms.splice(i, 1); this._open.delete(i); this._fire(); this._render(); });
+
+    const cover = { entity: { domain: "cover" } };
+    const form = this._form(r, [
+      { type: "grid", name: "", schema: [{ name: "name", selector: { text: {} } }, { name: "icon", selector: { icon: {} } }] },
+      { name: "floor", selector: { text: {} } },
+      { name: "bottom", selector: cover },
+      { name: "top", selector: cover },
+      { type: "expandable", name: "individual", flatten: true, title: t.individual, expanded: !!(r.left_bottom || r.right_bottom), schema: [
+        { type: "grid", name: "", schema: [{ name: "left_bottom", selector: cover }, { name: "right_bottom", selector: cover }] },
+        { type: "grid", name: "", schema: [{ name: "left_top", selector: cover }, { name: "right_top", selector: cover }] },
+      ] },
+      { name: "door", selector: { entity: { domain: "binary_sensor" } } },
+      { name: "door_side", selector: { select: { mode: "dropdown", options: [
+        { value: "both", label: t.side_both }, { value: "left", label: t.side_left }, { value: "right", label: t.side_right }] } } },
+    ], v => {
+      const keep = r.buttons;
+      Object.keys(r).forEach(k => delete r[k]);
+      Object.entries(v).forEach(([k, val]) => { if (val !== "" && val !== undefined && val !== null) r[k] = val; });
+      if (keep !== undefined) r.buttons = keep;
+      det.querySelector(".sn").textContent = r.name || `${t.room} ${i + 1}`;
+      this._fire();
+    });
+    det.querySelector("[data-form]").appendChild(form);
+
+    const bl = det.querySelector("[data-buttons]");
+    if (!Array.isArray(r.buttons)) bl.innerHTML = `<div class="hint">${esc(t.standardButtons)}</div>`;
+    else if (!r.buttons.length) bl.innerHTML = `<div class="hint">${esc(t.noButtons)}</div>`;
+    else r.buttons.forEach((b, j) => bl.appendChild(this._buttonEl(r, b, j)));
+    tools("addBtn", () => {
+      if (!Array.isArray(r.buttons)) r.buttons = DEFAULT_BUTTONS.map(b => ({ ...b, name: this._t[b.name.slice(1)] || b.name, ...(b.position ? { position: { ...b.position } } : {}) }));
+      r.buttons.push({ name: "", icon: "mdi:blinds", script: "" });
+      this._fire(); this._render();
+    });
+    if (Array.isArray(r.buttons)) tools("defaults", () => { delete r.buttons; this._fire(); this._render(); });
+    return det;
+  }
+
+  _buttonEl(r, b, j) {
+    const t = this._t;
+    const type = b.action === "stop" ? "stop" : b.position ? "position" : (b.entity && b.entity.startsWith("scene.")) ? "scene" : "script";
+    const box = document.createElement("div");
+    box.className = "btn";
+    box.innerHTML = `<div class="btools"><button data-b="up" ${j === 0 ? "disabled" : ""}><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+      <button data-b="down" ${j === r.buttons.length - 1 ? "disabled" : ""}><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+      <button data-b="del"><ha-icon icon="mdi:close"></ha-icon></button></div>`;
+    const schema = [
+      { type: "grid", name: "", schema: [{ name: "name", selector: { text: {} } }, { name: "icon", selector: { icon: {} } }] },
+      { name: "btype", selector: { select: { mode: "dropdown", options: [
+        { value: "script", label: t.t_script }, { value: "scene", label: t.t_scene },
+        { value: "position", label: t.t_position }, { value: "stop", label: t.t_stop }] } } },
+    ];
+    if (type === "script") schema.push({ name: "script", selector: { entity: { domain: "script" } } });
+    if (type === "scene") schema.push({ name: "scene", selector: { entity: { domain: "scene" } } });
+    if (type === "position") schema.push({ type: "grid", name: "", schema: [
+      { name: "pos_top", selector: { number: { min: 0, max: 100, mode: "box", unit_of_measurement: "%" } } },
+      { name: "pos_bottom", selector: { number: { min: 0, max: 100, mode: "box", unit_of_measurement: "%" } } }] });
+    if (type === "script" || type === "scene") schema.push({ name: "door_check", selector: { boolean: {} } });
+    const data = { name: b.name, icon: b.icon, btype: type, script: b.script, scene: b.entity,
+      pos_top: b.position && b.position.top, pos_bottom: b.position && b.position.bottom, door_check: !!b.door_check };
+    const f = this._form(data, schema, v => {
+      const nb = { name: v.name || "", icon: v.icon || "mdi:blinds" };
+      if (v.btype === "stop") nb.action = "stop";
+      else if (v.btype === "position") nb.position = { ...(v.pos_top !== undefined && v.pos_top !== "" ? { top: +v.pos_top } : {}), ...(v.pos_bottom !== undefined && v.pos_bottom !== "" ? { bottom: +v.pos_bottom } : {}) };
+      else if (v.btype === "scene") { nb.entity = v.scene || ""; if (v.door_check) nb.door_check = true; }
+      else { nb.script = v.script || ""; if (v.door_check) nb.door_check = true; }
+      r.buttons[j] = nb;
+      this._fire();
+      if (v.btype !== type) this._render();
+    });
+    box.appendChild(f);
+    const act = (k, fn) => box.querySelector(`[data-b="${k}"]`).addEventListener("click", ev => { ev.preventDefault(); fn(); this._fire(); this._render(); });
+    act("up", () => { [r.buttons[j - 1], r.buttons[j]] = [r.buttons[j], r.buttons[j - 1]]; });
+    act("down", () => { [r.buttons[j + 1], r.buttons[j]] = [r.buttons[j], r.buttons[j + 1]]; });
+    act("del", () => { r.buttons.splice(j, 1); });
+    return box;
+  }
+}
+
+TdbuBlindCardEditor.css = `
+:host{display:block}
+.sec{margin-bottom:18px}
+.h{font-weight:500;font-size:15px;margin:4px 0 8px;color:var(--primary-text-color)}
+.h2{font-weight:500;font-size:14px;margin:14px 0 6px;color:var(--primary-text-color)}
+.note{background:color-mix(in srgb,var(--warning-color,#ffa600) 15%,transparent);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:13px}
+details{border:1px solid var(--divider-color,rgba(0,0,0,.12));border-radius:10px;margin-bottom:8px;background:var(--card-background-color)}
+summary{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;list-style:none;--mdc-icon-size:20px;color:var(--primary-text-color)}
+summary::-webkit-details-marker{display:none}
+.sn{flex:1;font-weight:500}
+.tools,.btools{display:flex;gap:2px}
+.tools button,.btools button{border:none;background:none;cursor:pointer;color:var(--secondary-text-color);padding:4px;border-radius:50%;--mdc-icon-size:18px}
+.tools button:hover,.btools button:hover{background:color-mix(in srgb,var(--primary-text-color) 8%,transparent)}
+button[disabled]{opacity:.3;cursor:default}
+.body{padding:4px 12px 12px}
+.btn{border:1px dashed var(--divider-color,rgba(0,0,0,.2));border-radius:8px;padding:6px 10px 10px;margin-bottom:8px}
+.btools{justify-content:flex-end}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.add{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--divider-color,rgba(0,0,0,.2));background:none;color:var(--primary-color);border-radius:18px;padding:6px 12px;cursor:pointer;font:inherit;font-size:13px;--mdc-icon-size:18px}
+.add:hover{background:color-mix(in srgb,var(--primary-color) 8%,transparent)}
+.hint{font-size:13px;color:var(--secondary-text-color);margin:2px 0 8px}
+`;
+
+if (!customElements.get("tdbu-blind-card")) customElements.define("tdbu-blind-card", TdbuBlindCard);
+if (!customElements.get("tdbu-blind-card-editor")) customElements.define("tdbu-blind-card-editor", TdbuBlindCardEditor);
+// Version 1 registered the card as "tdbu-mushroom-style-card". Keep that name working.
+if (!customElements.get("tdbu-mushroom-style-card")) customElements.define("tdbu-mushroom-style-card", class extends TdbuBlindCard {});
+
+window.customCards = window.customCards || [];
+if (!window.customCards.some(c => c.type === "tdbu-blind-card")) {
+  window.customCards.push({
+    type: "tdbu-blind-card", name: "TDBU Blind Card", preview: true,
+    description: "Top-down/bottom-up blinds: drag the rails, both blinds together or one at a time.",
+    documentationURL: "https://github.com/WackeySSL/tdbu_blind_card",
+  });
+}
+console.info(`%c TDBU-BLIND-CARD %c ${TDBU_VERSION} `, "color:#fff;background:#8a6a45;font-weight:700", "color:#8a6a45;background:#fff");
