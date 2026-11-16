@@ -1,5 +1,5 @@
 /*!
- * TDBU Blind Card 2.0.0
+ * TDBU Blind Card 2.0.1
  * Home Assistant card for top-down/bottom-up (TDBU) blinds such as Hunter Douglas PowerView.
  * https://github.com/WackeySSL/tdbu_blind_card  ·  Apache License 2.0
  *
@@ -12,7 +12,7 @@
  *   bottom rail = 100 - position of bottom entity (bottom position 100 = rail at the top)
  */
 
-const TDBU_VERSION = "2.0.0";
+const TDBU_VERSION = "2.0.1";
 const GAP = 8;               // minimum distance between the two rails, in % of the window
 const PENDING_MS = 90000;    // keep showing a position we sent until the blind reports it
 

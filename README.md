@@ -275,6 +275,10 @@ rooms:
 
 ## Changelog
 
+### 2.0.1
+
+- Release made after the HACS validation passed, as required for the HACS default list. The card is the same as 2.0.0.
+
 ### 2.0.0
 
 - New card `custom:tdbu-blind-card`: one window per room with draggable rails, "Both" plus Left and Right.
